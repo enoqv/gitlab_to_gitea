@@ -677,7 +677,7 @@ def _import_project_repo(gitea_api: pygitea, project: gitlab.v4.objects.Project)
         clone_url = project.http_url_to_repo
         if GITLAB_ADMIN_PASS == '' and GITLAB_ADMIN_USER == '':
             clone_url = project.ssh_url_to_repo
-        private = project.visibility == 'private' or project.visibility == 'internal'
+        private = project.visibility == 'private' or project.visibility == 'limited'
 
         # Load the owner (users and groups can both be fetched using the /users/ endpoint)
         owner = get_user_or_group(gitea_api, project)
@@ -760,7 +760,7 @@ def _import_users(gitea_api: pygitea, users: [gitlab.v4.objects.User], notify: b
                     "send_notify": notify,
                     "source_id": 0, # local user
                     "username": user.username,
-                    "visibility": "internal"
+                    "visibility": "limited"
                 })
                 if import_response.ok:
                     print_info("User " + user.username + " imported, temporary password: " + tmp_password)
@@ -819,7 +819,7 @@ def _import_groups(gitea_api: pygitea, groups: [gitlab.v4.objects.Group]):
                 "location": "",
                 "username": name_clean(group.name),
                 "website": "",
-                "visibility": "internal"
+                "visibility": "limited"
             })
             if import_response.ok:
                 print_info("Group " + name_clean(group.name) + " imported!")
