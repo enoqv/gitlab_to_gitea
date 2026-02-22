@@ -101,26 +101,30 @@ def main():
             print('group:', group.full_path)
             # ıf we do not have access memberlist do not run member creating
             try:
-                for member in group.members.list(iterator=True):
+                for member in group.members.list(get_all=True, iterator=True):
                     print('    member:', member.username)
                     user_ids[member.id] = 1
             except Exception as e:
                 print("Skipping group member import for group " + group.full_path + " due to error: " + str(e))
             
-            for group_project in group.projects.list(iterator=True):
+            for group_project in group.projects.list(get_all=True, iterator=True):
                 print('    group_project:', group_project.name_with_namespace)
                 project_ids[group_project.id] = 1
                 project = gl.projects.get(id=group_project.id)
                 print('    project:', project.name_with_namespace)
-                for member in project.members.list(iterator=True):
+                for member in project.members.list(get_all=True, iterator=True):
                     print('        member:', member.username)
                     user_ids[member.id] = 1
-                for user in project.users.list(iterator=True):
+                for user in project.users.list(get_all=True, iterator=True):
                     print('        user:', user.username)
                     user_ids[user.id] = 1
 
         for user_id in user_ids:
             user = gl.users.get(id=user_id)
+            # # Skip internal or bot users
+            # if getattr(user, 'bot', False) or user.username.endswith('-bot') or user.username in ['ghost', 'support-bot', 'alert-bot']:
+            #     print('Skipping internal user:', user.username)
+            #     continue
             print('user_id:',user_id,' user:',user.username)
             users.append(user)
             for project in user.projects.list(iterator=True):
@@ -132,8 +136,16 @@ def main():
             projects.append(project)
 
     else:
-        users = gl.users.list(all=True)
-        projects = gl.projects.list(all=True)
+        for u in gl.users.list(get_all=True, iterator=True):
+            # if (getattr(u, 'bot', False) or u.username.endswith('-bot') or u.username in ['ghost', 'support-bot', 'alert-bot']):
+            #     print('Skipping internal user:', u.username)
+            #     continue
+            print('user_id:', u.id, ' user:', u.username)
+            users.append(u)
+
+        for project in gl.projects.list(get_all=True, iterator=True):
+            print('project_id:', project.id, ' project:', project.name_with_namespace, ' archived:', project.archived)
+            projects.append(project)
 
     print('Gathering projects and users...done')
 
@@ -173,9 +185,9 @@ def get_group_labels(gitea_api: pygitea, group: string) -> []:
 
     return existing_labels
 
-def get_merged_labels(gitea_api: pygitea, owner: string, repo: string) -> []:
+def get_merged_labels(gitea_api: pygitea, owner: string, repo: string, is_group: bool = False) -> []:
     project_labels = get_project_labels(gitea_api, owner, repo)
-    group_labels = get_group_labels(gitea_api, owner)
+    group_labels = get_group_labels(gitea_api, owner) if is_group else []
     return project_labels + group_labels
 
 def get_milestones(gitea_api: pygitea, owner: string, repo: string) -> []:
@@ -440,8 +452,9 @@ def get_issue_comment(gitea_api: pygitea, owner: string, repo: string, issue_url
 # Import helper functions
 #
 
-def _import_project_labels(gitea_api: pygitea, labels: [gitlab.v4.objects.ProjectLabel], owner: string, repo: string):
-    merged_labels = [label['name'] for label in get_merged_labels(gitea_api, owner, repo)]
+def _import_project_labels(gitea_api: pygitea, project: gitlab.v4.objects.Project, labels: [gitlab.v4.objects.ProjectLabel], owner: string, repo: string):
+    is_group = project.namespace.get('kind') == 'group'
+    merged_labels = [label['name'] for label in get_merged_labels(gitea_api, owner, repo, is_group)]
     for label in labels:
         if not label.name in merged_labels:
             import_response: requests.Response = gitea_api.post("/repos/" + owner + "/" + repo + "/labels", json={
@@ -489,12 +502,24 @@ def _import_project_milestones(gitea_api: pygitea, milestones: [gitlab.v4.object
                 print_error("Milestone " + milestone.title + " import failed: " + import_response.text)
 
 
-def _import_project_issues(gitea_api: pygitea, project_id, issues: [gitlab.v4.objects.ProjectIssue], owner: string, repo: string):
+def _import_project_issues(gitea_api: pygitea, project: gitlab.v4.objects.Project, issues: [gitlab.v4.objects.ProjectIssue], owner: string, repo: string):
     # reload all existing milestones and labels, needed for assignment in issues
+    is_group = project.namespace.get('kind') == 'group'
     existing_milestones = get_milestones(gitea_api, owner, repo)
-    existing_labels = get_merged_labels(gitea_api, owner, repo)
+    existing_labels = get_merged_labels(gitea_api, owner, repo, is_group)
 
-    org_members = [member['login'] for member in json.loads(gitea_api.get(f'/orgs/{owner}/members').text)]
+    org_members = []
+    # project.namespace['kind'] indicates if it's a 'user' or 'group'
+    if is_group:
+        org_members_response = gitea_api.get(f'/orgs/{owner}/members')
+        if org_members_response.ok:
+            org_members = [member['login'] for member in json.loads(org_members_response.text)]
+    else:
+        # If owner is a user rather than an organization, fallback to owner and collaborators
+        org_members = [owner]
+        collaborators = get_collaborators(gitea_api, owner, repo)
+        if collaborators:
+            org_members.extend([c.get('login', c.get('username')) for c in collaborators])
 
     for issue in issues:
         print("_import_project_issues" +  issue.title + " with owner: " + owner + ", repo: "+ repo)
@@ -521,7 +546,7 @@ def _import_project_issues(gitea_api: pygitea, project_id, issues: [gitlab.v4.ob
             labels = [label['id'] for label in existing_labels if label['name'] in issue.labels]
 
             created_at_utc = dateutil.parser.parse(issue.created_at)
-            created_at_local = created_at_utc.astimezone(pytz.timezone('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
+            created_at_local = created_at_utc.astimezone(pytz.timezone('Asia/Taipei')).strftime('%d.%m.%Y %H:%M')
             body = f"Created at: {created_at_local}\n\n{issue.description}"
             body = replace_issue_links(body, GITLAB_URL, GITEA_URL)
 
@@ -556,7 +581,7 @@ def _import_project_issues(gitea_api: pygitea, project_id, issues: [gitlab.v4.ob
 
             image_links = re.findall(r'\[.*?\]\((/uploads/.*?)\)', issue.description or '')
             for image_link in image_links:
-                attachment_url = GITLAB_API_BASEURL + '/projects/' + str(project_id) + image_link
+                attachment_url = GITLAB_API_BASEURL + '/projects/' + str(project.id) + image_link
                 attachment_response = requests.get(attachment_url, headers={'PRIVATE-TOKEN': GITLAB_TOKEN})
                 if attachment_response.ok:
                     tmp_path = f'/tmp/gitlab_to_gitea/{os.path.basename(image_link)}'
@@ -592,7 +617,7 @@ def _import_project_issues(gitea_api: pygitea, project_id, issues: [gitlab.v4.ob
                     print_error("Issue " + issue.title + " update failed: " + update_response.text)
 
         # import the comments for the issue
-        _import_issue_comments(gitea_api, project_id, gitea_issue, owner, repo, notes, org_members)
+        _import_issue_comments(gitea_api, project.id, gitea_issue, owner, repo, notes, org_members)
 
 
 def _import_issue_comments(gitea_api: pygitea, project_id, issue, owner: string, repo: string, notes: List[gitlab.v4.objects.ProjectIssueNote], org_members: List[str]):
@@ -605,7 +630,7 @@ def _import_issue_comments(gitea_api: pygitea, project_id, issue, owner: string,
 
         if not existing_comment:
             created_at_utc = dateutil.parser.parse(note.created_at)
-            created_at_local = created_at_utc.astimezone(pytz.timezone('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
+            created_at_local = created_at_utc.astimezone(pytz.timezone('Asia/Taipei')).strftime('%d.%m.%Y %H:%M')
             body = f"{note.body}\n\n{created_at_local}"
             body = replace_issue_links(body, GITLAB_URL, GITEA_URL)
             
@@ -701,6 +726,16 @@ def _import_project_repo(gitea_api: pygitea, project: gitlab.v4.objects.Project)
             })
             if import_response.ok:
                 print_info("Project " + name_clean(project.name) + " imported!")
+                
+                # Archive the repository if it's archived in GitLab and REPOSITORY_MIRROR is False
+                if getattr(project, 'archived', False) and not REPOSITORY_MIRROR:
+                    archive_response: requests.Response = gitea_api.patch("/repos/" + name_clean(project.namespace['name']) + "/" + name_clean(project.name), json={
+                        "archived": True
+                    })
+                    if archive_response.ok:
+                        print_info("Project " + name_clean(project.name) + " archived in Gitea!")
+                    else:
+                        print_error("Project " + name_clean(project.name) + " archiving failed: " + archive_response.text)
             else:
                 print_error("Project " + name_clean(project.name) + " import failed: " + import_response.text)
         else:
@@ -894,10 +929,10 @@ def import_projects(gitlab_api: gitlab.Gitlab, gitea_api: pygitea, projects: Lis
                 print("WARNING: Failed to archive project '{}', reason: {}".format(project.name, e))
         
         try:
-            collaborators: [gitlab.v4.objects.ProjectMember] = project.members.list(all=True)
-            labels: [gitlab.v4.objects.ProjectLabel] = project.labels.list(all=True)
-            milestones: [gitlab.v4.objects.ProjectMilestone] = project.milestones.list(all=True)
-            issues: [gitlab.v4.objects.ProjectIssue] = sorted(project.issues.list(all=True), key=lambda x: x.iid)
+            collaborators: [gitlab.v4.objects.ProjectMember] = project.members.list(get_all=True)
+            labels: [gitlab.v4.objects.ProjectLabel] = project.labels.list(get_all=True)
+            milestones: [gitlab.v4.objects.ProjectMilestone] = project.milestones.list(get_all=True)
+            issues: [gitlab.v4.objects.ProjectIssue] = sorted(project.issues.list(get_all=True), key=lambda x: x.iid)
 
             print("Importing project " + name_clean(project.name) + " from owner " + name_clean(project.namespace['name']))
             print("Found " + str(len(collaborators)) + " collaborators for project " + name_clean(project.name))
@@ -919,13 +954,13 @@ def import_projects(gitlab_api: gitlab.Gitlab, gitea_api: pygitea, projects: Lis
             _import_project_repo_collaborators(gitea_api, collaborators, project)
 
             # import labels
-            _import_project_labels(gitea_api, labels, projectOwner, projectName)
+            _import_project_labels(gitea_api, project, labels, projectOwner, projectName)
 
             # import milestones
             _import_project_milestones(gitea_api, milestones, projectOwner, projectName)
 
             # import issues
-            _import_project_issues(gitea_api, project.id, issues, projectOwner, projectName)
+            _import_project_issues(gitea_api, project, issues, projectOwner, projectName)
 
 
 def truncate_all(gitea_api: pygitea):
@@ -935,6 +970,18 @@ def truncate_all(gitea_api: pygitea):
     users_response = gitea_api.get('/admin/users')
     users =  json.loads(users_response.text)
     for user in users:
+        # Delete user packages
+        packages_response = gitea_api.get(f'/packages/{user["login"]}')
+        if packages_response.ok:
+            packages = json.loads(packages_response.text)
+            for pkg in packages:
+                # API format: DELETE /api/v1/packages/{owner}/{type}/{name}/{version}
+                pkg_delete_response = gitea_api.delete(f'/packages/{user["login"]}/{pkg["type"]}/{pkg["name"]}/{pkg["version"]}')
+                if pkg_delete_response.ok:
+                    print_info(f'Package {user["login"]}/{pkg["type"]}/{pkg["name"]}/{pkg["version"]} deleted!')
+                else:
+                    print_error(f'Package {user["login"]}/{pkg["type"]}/{pkg["name"]}/{pkg["version"]} deletion failed: {pkg_delete_response.text}')
+
         # Delete user repositories
         user_repos_response = gitea_api.get(f'/users/{user["login"]}/repos')
         user_repos = json.loads(user_repos_response.text)
@@ -949,6 +996,18 @@ def truncate_all(gitea_api: pygitea):
     organizations_response = gitea_api.get('/orgs')
     organizations = json.loads(organizations_response.text)
     for org in organizations:
+        # Delete organization packages
+        packages_response = gitea_api.get(f'/packages/{org["username"]}')
+        if packages_response.ok:
+            packages = json.loads(packages_response.text)
+            for pkg in packages:
+                # API format: DELETE /api/v1/packages/{owner}/{type}/{name}/{version}
+                pkg_delete_response = gitea_api.delete(f'/packages/{org["username"]}/{pkg["type"]}/{pkg["name"]}/{pkg["version"]}')
+                if pkg_delete_response.ok:
+                    print_info(f'Package {org["username"]}/{pkg["type"]}/{pkg["name"]}/{pkg["version"]} deleted!')
+                else:
+                    print_error(f'Package {org["username"]}/{pkg["type"]}/{pkg["name"]}/{pkg["version"]} deletion failed: {pkg_delete_response.text}')
+        
         # Delete organization repositories
         org_repos_response = gitea_api.get(f'/orgs/{org["username"]}/repos')
         org_repos = json.loads(org_repos_response.text)
