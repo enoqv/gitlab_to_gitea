@@ -7,8 +7,8 @@ This script support migrating the following data:
  - Repositories & Wiki (fork status is lost)
  - Milestones
  - Labels
- - Issues (no comments)
- - Users (no profile pictures)
+ - Issues (including comments)
+ - Users (including profile pictures)
  - Groups
  - Public SSH keys
 
