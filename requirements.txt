@@ -2,5 +2,5 @@ python-gitlab
 requests
 python-dateutil
 mysql-connector
-git+https://github.com/h44z/pygitea
 pytz
+parse

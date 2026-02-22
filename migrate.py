@@ -14,7 +14,7 @@ import pytz
 
 import gitlab  # pip install python-gitlab
 import gitlab.v4.objects
-import pygitea # pip install pygitea (https://github.com/h44z/pygitea)
+import pygitea
 
 SCRIPT_VERSION = "1.0"
 GLOBAL_ERROR_COUNT = 0
