@@ -15,6 +15,11 @@ import pytz
 import gitlab  # pip install python-gitlab
 import gitlab.v4.objects
 import pygitea
+import psycopg2
+import dotenv
+
+dotenv.load_dotenv()
+
 
 SCRIPT_VERSION = "1.0"
 GLOBAL_ERROR_COUNT = 0
@@ -22,6 +27,18 @@ GLOBAL_ERROR_COUNT = 0
 #######################
 # CONFIG SECTION START
 #######################
+
+# Gitea 資料庫設定 (這裡以 PostgreSQL 為例，請根據你的 Gitea 資料庫類型修改)
+PG_HOST = os.getenv("PG_HOST", "localhost")
+PG_PORT = os.getenv("PG_PORT", "5432")
+PG_NAME = os.getenv("PG_NAME", "gitea")
+PG_USER = os.getenv("PG_USER", "gitea")
+PG_PASS = os.getenv("PG_PASS", "gitea")
+
+# 預設的登入來源 ID (0 表示預設/本機或未指定特定登入來源，可根據需求修改)
+LOGIN_SOURCE_ID = 0
+# 供應商名稱，Gitea 預設吃 'gitlab'
+PROVIDER_NAME = "gitlab"
 
 # Gitea user to use as a fallback for groups
 # for cases where the user's permissions are too limited to access group member details on GitLab.
@@ -78,7 +95,6 @@ def main():
         print('Truncate...')
         truncate_all(gt)
         print('Truncate... done')
-
 
     # Create a directory in /tmp called gitlab_to_gitea
     tmp_dir = '/tmp/gitlab_to_gitea'
@@ -152,6 +168,9 @@ def main():
     # IMPORT USERS AND GROUPS
     import_users_groups(gl, gt, users, groups)
 
+    # MAP USERS
+    map_users()
+
     # IMPORT PROJECTS
     import_projects(gl, gt, projects)
 
@@ -194,7 +213,7 @@ def get_milestones(gitea_api: pygitea, owner: string, repo: string) -> []:
     existing_milestones = []
     milestone_response: requests.Response = gitea_api.get("/repos/" + owner + "/" + repo + "/milestones")
     if milestone_response.ok:
-        existing_milestones = [milestone['title'] for milestone in milestone_response.json()]
+        existing_milestones = milestone_response.json()
     else:
         print_error("Failed to load existing milestones for project " + repo + "! " + milestone_response.text)
 
@@ -391,7 +410,7 @@ def group_label_exists(gitea_api: pygitea, group: string, labelname: string) -> 
 
 def milestone_exists(gitea_api: pygitea, owner: string, repo: string, milestone: string) -> bool:
     print("Looking for " + "/repos/" + owner + "/" + repo + "/milestones" + " in Gitea!")
-    existing_milestones = get_milestones(gitea_api, owner, repo)
+    existing_milestones = [m['title'] for m in get_milestones(gitea_api, owner, repo)]
     if existing_milestones:
         if milestone in existing_milestones:
             print_warning("Milestone " + milestone + " already exists in project " + repo + " of owner " + owner)
@@ -521,6 +540,8 @@ def _import_project_issues(gitea_api: pygitea, project: gitlab.v4.objects.Projec
         if collaborators:
             org_members.extend([c.get('login', c.get('username')) for c in collaborators])
 
+    is_public = getattr(project, 'visibility', 'private') == 'public'
+
     for issue in issues:
         print("_import_project_issues" +  issue.title + " with owner: " + owner + ", repo: "+ repo)
         notes: List[gitlab.v4.objects.ProjectIssueNote] = sorted(issue.notes.list(all=True), key=lambda x: x.created_at)
@@ -531,17 +552,22 @@ def _import_project_issues(gitea_api: pygitea, project: gitlab.v4.objects.Projec
             if issue.due_date is not None:
                 due_date = dateutil.parser.parse(issue.due_date).strftime('%Y-%m-%dT%H:%M:%SZ')
             
-            assignee = None
-            if issue.assignee is not None:
-                assignee = issue.assignee['username']
+            # assignee = None
+            # if issue.assignee is not None:
+            #     assignee = issue.assignee['username']
 
             assignees = []
+            if issue.assignee is not None:
+                assignees.append(issue.assignee['username'])
             for tmp_assignee in issue.assignees:
                 assignees.append(tmp_assignee['username'])
 
             milestone = None
-            if issue.milestone is not None and issue.milestone['title'] in existing_milestones:
-                milestone = issue.milestone['id']
+            if issue.milestone is not None:
+                for em in existing_milestones:
+                    if em['title'] == issue.milestone['title']:
+                        milestone = em['id']
+                        break
 
             labels = [label['id'] for label in existing_labels if label['name'] in issue.labels]
 
@@ -551,14 +577,13 @@ def _import_project_issues(gitea_api: pygitea, project: gitlab.v4.objects.Projec
             body = replace_issue_links(body, GITLAB_URL, GITEA_URL)
 
             params = {}
-            if issue.author['username'] in org_members:
+            if is_public or issue.author['username'] in org_members:
                 params['sudo'] = issue.author['username']
             else:
                 body = f"Autor: {issue.author['name']}\n\n{body}"
 
 
             import_response: requests.Response = gitea_api.post("/repos/" + owner + "/" + repo + "/issues", json={
-                "assignee": assignee,
                 "assignees": assignees,
                 "body": body,
                 "closed": issue.state == 'closed',
@@ -617,10 +642,10 @@ def _import_project_issues(gitea_api: pygitea, project: gitlab.v4.objects.Projec
                     print_error("Issue " + issue.title + " update failed: " + update_response.text)
 
         # import the comments for the issue
-        _import_issue_comments(gitea_api, project.id, gitea_issue, owner, repo, notes, org_members)
+        _import_issue_comments(gitea_api, project.id, gitea_issue, owner, repo, notes, org_members, is_public)
 
 
-def _import_issue_comments(gitea_api: pygitea, project_id, issue, owner: string, repo: string, notes: List[gitlab.v4.objects.ProjectIssueNote], org_members: List[str]):
+def _import_issue_comments(gitea_api: pygitea, project_id, issue, owner: string, repo: string, notes: List[gitlab.v4.objects.ProjectIssueNote], org_members: List[str], is_public: bool = False):
     for note in notes:
         short_comment_body = (note.body[0:10] + "...") if len(note.body) > 10 else note.body
 
@@ -635,7 +660,7 @@ def _import_issue_comments(gitea_api: pygitea, project_id, issue, owner: string,
             body = replace_issue_links(body, GITLAB_URL, GITEA_URL)
             
             params = {}
-            if note.author['username'] in org_members:
+            if is_public or note.author['username'] in org_members:
                 params['sudo'] = note.author['username']
             else:
                 body = f"Autor: {note.author['name']}\n\n{body}"
@@ -722,7 +747,14 @@ def _import_project_repo(gitea_api: pygitea, project: gitlab.v4.objects.Project)
                 "mirror": REPOSITORY_MIRROR,
                 "private": private,
                 "repo_name": name_clean(project.name),
-                "uid": owner['id']
+                "uid": owner['id'],
+                "issues": True,
+                "labels": True,
+                "lfs": True,
+                "milestones": True,
+                "pull_requests": True,
+                "service": "gitlab",
+                "wiki": True
             })
             if import_response.ok:
                 print_info("Project " + name_clean(project.name) + " imported!")
@@ -960,8 +992,141 @@ def import_projects(gitlab_api: gitlab.Gitlab, gitea_api: pygitea, projects: Lis
             _import_project_milestones(gitea_api, milestones, projectOwner, projectName)
 
             # import issues
-            _import_project_issues(gitea_api, project, issues, projectOwner, projectName)
+            # _import_project_issues(gitea_api, project, issues, projectOwner, projectName)
 
+def get_gitea_users(cursor):
+    """
+    從 Gitea 資料庫取得所有使用者
+    回傳 dict: {lower_name: user_id}
+    """
+    cursor.execute(
+        'SELECT id, lower_name FROM "user" WHERE type = 0;'
+    )  # type=0 通常是一般使用者
+    gitea_users = {}
+    for row in cursor.fetchall():
+        user_id, lower_name = row
+        if lower_name:
+            gitea_users[lower_name] = user_id
+    return gitea_users
+
+
+def get_existing_mappings(cursor):
+    """
+    取得已經存在 external_login_user 表中的對應關係
+    回傳 set: {(external_id, login_source_id)}
+    """
+    cursor.execute(
+        "SELECT external_id, login_source_id FROM external_login_user WHERE provider = %s;",
+        (PROVIDER_NAME,),
+    )
+    return set(cursor.fetchall())
+
+
+def map_users():
+    print("---=== GitLab to Gitea User Mapping ===---")
+
+    # 1. 連線到 GitLab
+    try:
+        gl = gitlab.Gitlab(GITLAB_URL, private_token=GITLAB_TOKEN)
+        gl.auth()
+        print(f"Connected to GitLab: {GITLAB_URL}")
+    except Exception as e:
+        print(f"Failed to connect to GitLab: {e}")
+        raise e
+
+    # 2. 連線到 Gitea 資料庫
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, dbname=PG_NAME, user=PG_USER, password=PG_PASS
+        )
+        cursor = conn.cursor()
+        print(f"Connected to Gitea Database: {PG_NAME}")
+    except Exception as e:
+        print(f"Failed to connect to Gitea Database: {e}")
+        raise e
+
+    # 3. 取得兩邊的資料
+    print("Fetching users from Gitea database...")
+    gitea_users_by_username = get_gitea_users(cursor)
+    print(f"Found {len(gitea_users_by_username)} users in Gitea.")
+
+    print("Fetching existing mappings...")
+    existing_mappings = get_existing_mappings(cursor)
+
+    print("Fetching users from GitLab...")
+    # 注意：如果 GitLab 人數非常多，請考慮分頁或使用 iterator
+    gitlab_users = gl.users.list(all=True)
+    print(f"Found {len(gitlab_users)} users in GitLab.")
+
+    # 4. 進行比對與寫入
+    insert_query = """
+        INSERT INTO external_login_user 
+        (external_id, user_id, login_source_id, provider, email, name, first_name, last_name, nick_name, description, avatar_url, location, access_token, access_token_secret, refresh_token) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    mapped_count = 0
+    for gl_user in gitlab_users:
+        if not gl_user.username:
+            continue
+
+        username = gl_user.username.lower()
+        external_id = str(gl_user.id)
+
+        # 檢查是否已經 mapping 過了
+        if (external_id, LOGIN_SOURCE_ID) in existing_mappings:
+            print(
+                f"User {gl_user.username} (GitLab ID: {external_id}) is already mapped. Skipping."
+            )
+            continue
+
+        # 檢查 Gitea 是否有這個 username
+        if username in gitea_users_by_username:
+            gitea_user_id = gitea_users_by_username[username]
+
+            try:
+                # 寫入資料庫
+                # 注意：這裡補上 Gitea external_login_user 表所需的欄位，空值給空字串
+                cursor.execute(
+                    insert_query,
+                    (
+                        external_id,
+                        gitea_user_id,
+                        LOGIN_SOURCE_ID,
+                        PROVIDER_NAME,
+                        gl_user.email or "",
+                        gl_user.username,
+                        "",  # first_name
+                        "",  # last_name
+                        gl_user.name,  # nick_name
+                        "",  # description
+                        gl_user.avatar_url or "",
+                        "",  # location
+                        "",  # access_token
+                        "",  # access_token_secret
+                        "",  # refresh_token
+                    ),
+                )
+                mapped_count += 1
+                print(
+                    f"Mapped GitLab user {gl_user.username} (ID: {external_id}) to Gitea user ID: {gitea_user_id}"
+                )
+            except Exception as e:
+                print(f"Error inserting mapping for {gl_user.username}: {e}")
+                conn.rollback()  # 發生錯誤時 rollback
+                continue
+        else:
+            print(f"GitLab user {gl_user.username} not found in Gitea. Skipping.")
+
+    # 5. 提交並關閉連線
+    if mapped_count > 0:
+        conn.commit()
+        print(f"Successfully mapped {mapped_count} users.")
+    else:
+        print("No new users were mapped.")
+
+    cursor.close()
+    conn.close()
 
 def truncate_all(gitea_api: pygitea):
     print("Truncate all projects, organizations, and users!")

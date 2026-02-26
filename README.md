@@ -11,14 +11,25 @@ This script support migrating the following data:
  - Users (including profile pictures)
  - Groups
  - Public SSH keys
+ - mapping users between Gitlab and Gitea
 
-Tested with Gitlab Version 13.0.6 and Gitea Version 1.11.6.
+Tested with Gitlab Version 16.7.3 and Gitea Version 1.25.4 (with PostgreSQL database).
 
 ## Usage
+Create a `.env` file in the root directory of the project.
+fill necessary environment variables (reference top of `migrate.py`).
+
 Change items in the config section of the script.
 
 Install all dependencies via `python -m pip install -r requirements.txt` and
 use python3 to execute the script.
+
+database table `external_login_user` is used to map users between Gitlab and Gitea.
+this table could be cleaned after the migration is finished.
+
+```sql
+DELETE FROM external_login_user;
+```
 
 ### How to use with venv
 To keep your local system clean, it might be helpful to store all Python dependencies in one folder.
