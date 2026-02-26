@@ -4,3 +4,5 @@ python-dateutil
 mysql-connector
 pytz
 parse
+psycopg2
+python-dotenv
