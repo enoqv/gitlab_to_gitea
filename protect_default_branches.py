@@ -142,7 +142,7 @@ def build_protection_payload(branch_name: str) -> dict:
     """
     return {
         "branch_name": branch_name,
-        "enable_push": False,
+        "enable_push": True,
         "enable_force_push": False,
         "enable_push_whitelist": False,
         "enable_merge_whitelist": False,
